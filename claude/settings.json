@@ -1,0 +1,145 @@
+{
+  "cleanupPeriodDays": 365,
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+  "includeGitInstructions": false,
+  "permissions": {
+    "ask": [
+      "mcp__claude_ai_Slack__slack_send_message",
+      "mcp__claude_ai_Slack__slack_schedule_message",
+      "mcp__claude_ai_Slack__slack_create_canvas",
+      "mcp__claude_ai_Slack__slack_update_canvas",
+      "Bash(gh pr review:*)",
+      "Bash(gh pr comment:*)"
+    ],
+    "defaultMode": "auto"
+  },
+  "model": "opus[1m]",
+  "skillOverrides": {
+    "cowork-plugin-management:cowork-plugin-customizer": "off",
+    "cowork-plugin-management:create-cowork-plugin": "off",
+    "engineering:architecture": "user-invocable-only",
+    "engineering:code-review": "user-invocable-only",
+    "engineering:debug": "user-invocable-only",
+    "engineering:deploy-checklist": "user-invocable-only",
+    "engineering:documentation": "user-invocable-only",
+    "engineering:incident-response": "user-invocable-only",
+    "engineering:standup": "user-invocable-only",
+    "engineering:system-design": "user-invocable-only",
+    "engineering:tech-debt": "user-invocable-only",
+    "engineering:testing-strategy": "user-invocable-only",
+    "productivity:memory-management": "user-invocable-only",
+    "productivity:start": "user-invocable-only",
+    "productivity:task-management": "user-invocable-only",
+    "productivity:update": "user-invocable-only"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact|fork)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/hirad/.claude/hooks/herdr-agent-state.sh' session",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "^(startup|resume|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/workspace-context.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh",
+    "padding": 0,
+    "refreshInterval": 30
+  },
+  "enabledPlugins": {
+    "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "outputStyle": "Concise",
+  "spinnerVerbs": {
+    "mode": "replace",
+    "verbs": [
+      "Appeasing the linter",
+      "Arguing with the query planner",
+      "Asking Bugbot to elaborate",
+      "Asking the replicas who is primary",
+      "Bribing the compiler",
+      "Bribing the connection pool",
+      "Chasing orphaned finalizers",
+      "Consulting the forbidden docs",
+      "Cooking forbidden spaghetti",
+      "Deslopping the diff",
+      "Disturbing the void",
+      "Doing suspiciously legal things",
+      "Electing a less cursed leader",
+      "Exorcising idle transactions",
+      "Following the feature flag maze",
+      "Gaslighting the type checker",
+      "Growing another worktree",
+      "Herding cursed semicolons",
+      "Making eventual consistency hurry up",
+      "Making it weird",
+      "Negotiating a peaceful switchover",
+      "Negotiating with entropy",
+      "Negotiating with the WAL",
+      "Overthinking professionally",
+      "Poking the machine spirit",
+      "Polishing the haunted cache",
+      "Preventing a tiny split brain",
+      "Probing for signs of life",
+      "Questioning my life choices",
+      "Reading the overnight runes",
+      "Rearranging the bits",
+      "Reconciling the unreconcilable",
+      "Reticulating splines",
+      "Reviewing the reviewer’s review",
+      "Shaking the dependency tree",
+      "Stealing fire from the cloud",
+      "Summoning tiny demons",
+      "Teaching the operator restraint",
+      "Turning coffee into tokens",
+      "Untangling eldritch noodles",
+      "Vacuuming the haunted tuples",
+      "Violating causality",
+      "Waiting for the cluster to agree",
+      "Waking the ancient APIs",
+      "Whispering to the scheduler"
+    ]
+  },
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    },
+    "claude-sonnet-5-5": {
+      "effortLevel": "high"
+    }
+  },
+  "tui": "fullscreen",
+  "voice": {
+    "enabled": true
+  },
+  "showThinkingSummaries": true,
+  "skipWorkflowUsageWarning": true,
+  "theme": "auto",
+  "precomputeCompactionEnabled": true,
+  "switchModelsOnFlag": true,
+  "showTurnDuration": true,
+  "showMessageTimestamps": true,
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true,
+  "skipAutoPermissionPrompt": true
+}

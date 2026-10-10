@@ -1,0 +1,792 @@
+/**
+ * Status Footer - a pi port of the Claude statusline (lib/claude/statusline.sh).
+ *
+ * Layout: ❬directory❭❬branch +added -deleted #pr ↑ahead ↓behind❭     ❬model · thinking❭
+ *         ❬context pct% / window❭                                ❬quotas · $cost❭
+ * Groups sit in angle brackets. Normal widths use two inset rows; narrow widths compact
+ * optional details, then wrap groups.
+ *
+ * - folder/branch, ahead/behind, tracked diffstats, and untracked file count come from git,
+ *   polled every GIT_REFRESH_INTERVAL_MS off the render path with reads that never overlap;
+ *   branch changes refresh immediately, and untracked counting stops at UNTRACKED_LIMIT ("?10000+")
+ * - the current branch's pull request number and status come from `gh pr view`;
+ *   error means failed CI/changes requested, warning means pending CI/review activity,
+ *   success means ready to merge, accent means merged, and muted means another state
+ *   (failed or unauthenticated lookups are silently omitted and misses are cached)
+ * - worktrees and nested `.workspaces` directories display compactly as "project⎇workspace";
+ *   other deep paths omit intermediate directories
+ * - context percentage retains the statusline scaling: 80% real -> 100% displayed
+ * - session cost is summed from assistant message usage (same as the default footer)
+ * - subscription quota chips are fetched for Anthropic and OpenAI Codex OAuth;
+ *   providers without a supported usage API (including Cursor) are omitted
+ *
+ * Not portable from the Claude statusline: the identity chip (pi runs a single identity).
+ */
+
+import { execFile, spawn } from "node:child_process";
+import { basename, dirname, relative, sep } from "node:path";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  Theme,
+  ThemeColor,
+} from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+
+const GIT_REFRESH_INTERVAL_MS = 2000;
+const GIT_TIMEOUT_MS = 3000;
+const UNTRACKED_LIMIT = 10_000;
+const PR_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+/** Tools that run a separate agent, whose usage is reported as agent cost rather than main. */
+const AGENT_TOOLS = new Set(["subagent", "claude"]);
+
+export interface GitInfo {
+  /** Display name for the folder part, e.g. "home/src" or "home⎇feat-x/src" */
+  dir: string;
+  ahead: number;
+  behind: number;
+  added: number;
+  deleted: number;
+  untracked: number;
+  /** Counting stopped at UNTRACKED_LIMIT or git was cut off, so the real count is higher. */
+  untrackedTruncated: boolean;
+}
+
+export interface UntrackedCount {
+  count: number;
+  truncated: boolean;
+}
+
+export interface GitStatusPoller {
+  current(): GitInfo | null;
+  /** Read again now, or right after the read in flight finishes. */
+  refresh(): void;
+  /** Drop stale state and discard any read that started before this call. */
+  invalidate(): void;
+  dispose(): void;
+}
+
+type PullRequestStatus = "failed" | "pending" | "ready" | "merged" | "other";
+
+interface PullRequestInfo {
+  branch: string;
+  number: number;
+  status: PullRequestStatus;
+}
+
+interface QuotaWindow {
+  label: string;
+  usedPercent: number;
+}
+
+interface ProviderQuota {
+  provider: string;
+  windows: QuotaWindow[];
+}
+
+function runGit(cwd: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      ["-C", cwd, "--no-optional-locks", ...args],
+      {
+        encoding: "utf8",
+        timeout: GIT_TIMEOUT_MS,
+      },
+      (error, stdout) => resolve(error ? null : stdout.trim()),
+    );
+  });
+}
+
+/**
+ * Counts untracked files by streaming `git ls-files -z` and counting separators, so a huge
+ * untracked tree is never held in memory (execFile's default buffer would drop it entirely).
+ * Counting stops at `limit`; the result is then reported as truncated.
+ */
+export function countUntrackedFiles(
+  cwd: string,
+  limit = UNTRACKED_LIMIT,
+): Promise<UntrackedCount | null> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      "git",
+      [
+        "-C",
+        cwd,
+        "--no-optional-locks",
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ":/",
+      ],
+      { stdio: ["ignore", "pipe", "ignore"], timeout: GIT_TIMEOUT_MS },
+    );
+    let count = 0;
+    let truncated = false;
+    let settled = false;
+    const finish = (value: UntrackedCount | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (truncated) return;
+      for (let offset = chunk.indexOf(0); offset !== -1; offset = chunk.indexOf(0, offset + 1)) {
+        if (++count > limit) {
+          count = limit;
+          truncated = true;
+          child.kill();
+          return;
+        }
+      }
+    });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      if (truncated) return finish({ count, truncated: true });
+      if (code === 0) return finish({ count, truncated: false });
+      // git failed, or the timeout cut it off after a partial listing.
+      finish(count > 0 ? { count, truncated: true } : null);
+    });
+  });
+}
+
+async function readGitInfo(cwd: string): Promise<GitInfo | null> {
+  const toplevel = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+  if (!toplevel) return null;
+
+  const [commonDir, ab, numstat, untrackedCount] = await Promise.all([
+    runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    runGit(cwd, ["rev-list", "--left-right", "--count", "@{u}...HEAD"]),
+    runGit(cwd, ["diff", "--numstat", "HEAD", "--"]),
+    countUntrackedFiles(cwd),
+  ]);
+
+  // Worktree detection: main worktree root is the parent of the common git dir.
+  let dir = basename(toplevel);
+  if (commonDir) {
+    const mainRoot = dirname(commonDir);
+    if (mainRoot !== toplevel) {
+      dir = `${basename(mainRoot)}⎇${basename(toplevel)}`;
+    }
+  }
+
+  const subdir = relative(toplevel, cwd);
+  if (subdir && subdir !== ".." && !subdir.startsWith(`..${sep}`)) {
+    dir += `/${subdir.split(sep).join("/")}`;
+  }
+
+  let ahead = 0;
+  let behind = 0;
+  if (ab) {
+    const [b, a] = ab.split(/\s+/).map(Number);
+    behind = b || 0;
+    ahead = a || 0;
+  }
+
+  let added = 0;
+  let deleted = 0;
+  if (numstat) {
+    for (const line of numstat.split("\n")) {
+      const [a, d] = line.split("\t");
+      added += Number(a) || 0;
+      deleted += Number(d) || 0;
+    }
+  }
+
+  return {
+    dir,
+    ahead,
+    behind,
+    added,
+    deleted,
+    untracked: untrackedCount?.count ?? 0,
+    untrackedTruncated: untrackedCount?.truncated ?? false,
+  };
+}
+
+/**
+ * Polls git on a timer so rendering never spawns processes. Reads never overlap: a refresh
+ * requested while one is running is queued and runs once it finishes. pi-tui exposes no
+ * terminal focus signal, so polling continues while the terminal is unfocused.
+ */
+export function createGitStatusPoller(options: {
+  cwd: () => string;
+  read?: (cwd: string) => Promise<GitInfo | null>;
+  intervalMs?: number;
+  onChange: () => void;
+}): GitStatusPoller {
+  const { cwd, read = readGitInfo, intervalMs = GIT_REFRESH_INTERVAL_MS, onChange } = options;
+  let info: GitInfo | null = null;
+  let inFlight = false;
+  let queued = false;
+  let disposed = false;
+  let generation = 0;
+
+  const refresh = () => {
+    if (disposed) return;
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+
+    inFlight = true;
+    const directory = cwd();
+    const readGeneration = generation;
+    void read(directory)
+      .catch(() => null)
+      .then((next) => {
+        inFlight = false;
+        if (disposed) return;
+        if (readGeneration !== generation || directory !== cwd()) {
+          queued = true;
+        } else if (JSON.stringify(next) !== JSON.stringify(info)) {
+          info = next;
+          onChange();
+        }
+        if (queued) {
+          queued = false;
+          refresh();
+        }
+      });
+  };
+
+  const timer = setInterval(refresh, intervalMs);
+  refresh();
+
+  return {
+    current: () => info,
+    refresh,
+    invalidate() {
+      if (disposed) return;
+      generation++;
+      info = null;
+      refresh();
+    },
+    dispose() {
+      disposed = true;
+      clearInterval(timer);
+    },
+  };
+}
+
+export function classifyPullRequest(data: Record<string, unknown>): PullRequestStatus {
+  if (data.state === "MERGED" || typeof data.mergedAt === "string") return "merged";
+  if (data.state !== "OPEN") return "other";
+
+  let hasFailedCheck = false;
+  let hasPendingCheck = false;
+  if (Array.isArray(data.statusCheckRollup)) {
+    for (const value of data.statusCheckRollup) {
+      const check = asRecord(value);
+      if (!check) continue;
+
+      const conclusion = typeof check.conclusion === "string" ? check.conclusion : "";
+      const state = typeof check.state === "string" ? check.state : "";
+      const status = typeof check.status === "string" ? check.status : "";
+      if (
+        [
+          "ACTION_REQUIRED",
+          "CANCELLED",
+          "ERROR",
+          "FAILURE",
+          "STALE",
+          "STARTUP_FAILURE",
+          "TIMED_OUT",
+        ].includes(conclusion || state)
+      ) {
+        hasFailedCheck = true;
+      }
+      if (
+        ["EXPECTED", "IN_PROGRESS", "PENDING", "QUEUED", "REQUESTED", "WAITING"].includes(
+          state || status,
+        )
+      ) {
+        hasPendingCheck = true;
+      }
+    }
+  }
+
+  if (hasFailedCheck || data.reviewDecision === "CHANGES_REQUESTED") return "failed";
+
+  const hasReviewComments =
+    Array.isArray(data.latestReviews) &&
+    data.latestReviews.some((value) => {
+      const review = asRecord(value);
+      return review?.state === "COMMENTED" || review?.state === "PENDING";
+    });
+  if (hasPendingCheck || data.reviewDecision === "REVIEW_REQUIRED" || hasReviewComments) {
+    return "pending";
+  }
+
+  return data.isDraft !== true && data.mergeStateStatus === "CLEAN" ? "ready" : "other";
+}
+
+/** Pi reports a detached HEAD as the literal branch "detached", which `gh pr view` cannot resolve. */
+export function canLookupPullRequest(branch: string | null): branch is string {
+  return Boolean(branch) && branch !== "detached";
+}
+
+async function loadPullRequest(
+  pi: ExtensionAPI,
+  cwd: string,
+  branch: string,
+  signal: AbortSignal,
+): Promise<PullRequestInfo | null> {
+  const result = await pi.exec(
+    "gh",
+    [
+      "pr",
+      "view",
+      branch,
+      "--json",
+      "number,state,mergedAt,isDraft,mergeStateStatus,reviewDecision,statusCheckRollup,latestReviews",
+    ],
+    {
+      cwd,
+      signal,
+      timeout: 10_000,
+    },
+  );
+  if (result.code !== 0) return null;
+
+  const data = asRecord(JSON.parse(result.stdout));
+  const number = data?.number;
+  return typeof number === "number" && Number.isSafeInteger(number) && number > 0 && data
+    ? { branch, number, status: classifyPullRequest(data) }
+    : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function asPercent(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, value));
+}
+
+function windowLabel(seconds: number): string {
+  if (seconds <= 6 * 60 * 60) return "5h";
+  if (seconds <= 36 * 60 * 60) return "day";
+  if (seconds <= 8 * 24 * 60 * 60) return "wk";
+  return `${Math.round(seconds / (24 * 60 * 60))}d`;
+}
+
+function codexAccountId(token: string): string | null {
+  try {
+    const payload = asRecord(
+      JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")),
+    );
+    const auth = asRecord(payload?.["https://api.openai.com/auth"]);
+    return typeof auth?.chatgpt_account_id === "string" ? auth.chatgpt_account_id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchJson(
+  url: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const response = await fetch(url, {
+    headers: { accept: "application/json", ...headers },
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+  });
+  if (!response.ok) throw new Error(`Quota request failed: ${response.status}`);
+  return response.json();
+}
+
+async function loadProviderQuota(
+  ctx: ExtensionContext,
+  provider: string,
+  signal: AbortSignal,
+): Promise<ProviderQuota | null> {
+  const model = ctx.model;
+  if (!model || model.provider !== provider) return null;
+
+  const auth = await ctx.modelRegistry.getProviderAuth(provider);
+  const token = auth?.auth.apiKey;
+  if (!token || auth.source?.toLowerCase() !== "oauth") return null;
+
+  if (provider === "anthropic") {
+    const data = asRecord(
+      await fetchJson(
+        "https://api.anthropic.com/api/oauth/usage",
+        { authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20" },
+        signal,
+      ),
+    );
+    const windows: QuotaWindow[] = [];
+    const fiveHour = asPercent(asRecord(data?.five_hour)?.utilization);
+    const sevenDay = asPercent(asRecord(data?.seven_day)?.utilization);
+    if (fiveHour !== null) windows.push({ label: "5h", usedPercent: fiveHour });
+    if (sevenDay !== null) windows.push({ label: "wk", usedPercent: sevenDay });
+    return windows.length > 0 ? { provider, windows } : null;
+  }
+
+  if (provider === "openai-codex") {
+    const accountId = codexAccountId(token);
+    if (!accountId) return null;
+    const data = asRecord(
+      await fetchJson(
+        "https://chatgpt.com/backend-api/wham/usage",
+        { authorization: `Bearer ${token}`, "chatgpt-account-id": accountId },
+        signal,
+      ),
+    );
+    const rateLimit = asRecord(data?.rate_limit);
+    const windows: Array<QuotaWindow & { seconds: number }> = [];
+    for (const key of ["primary_window", "secondary_window"]) {
+      const window = asRecord(rateLimit?.[key]);
+      const usedPercent = asPercent(window?.used_percent);
+      const seconds = window?.limit_window_seconds;
+      if (usedPercent !== null && typeof seconds === "number" && seconds > 0) {
+        windows.push({ label: windowLabel(seconds), usedPercent, seconds });
+      }
+    }
+    windows.sort((a, b) => a.seconds - b.seconds);
+    return windows.length > 0
+      ? { provider, windows: windows.map(({ label, usedPercent }) => ({ label, usedPercent })) }
+      : null;
+  }
+
+  return null;
+}
+
+export interface SessionCosts {
+  total: number;
+  main: number;
+  subagents: number;
+  hasSubagents: boolean;
+}
+
+/** Session costs in dollars, with subagent usage separated from the parent session. */
+export function sessionCosts(ctx: ExtensionContext): SessionCosts {
+  let main = 0;
+  let subagents = 0;
+  let hasSubagents = false;
+
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type === "message" && entry.message.role === "assistant") {
+      main += entry.message.usage?.cost?.total ?? 0;
+      if (
+        entry.message.content.some((part) => part.type === "toolCall" && AGENT_TOOLS.has(part.name))
+      ) {
+        hasSubagents = true;
+      }
+    } else if (entry.type === "message" && entry.message.role === "toolResult") {
+      const cost = entry.message.usage?.cost?.total ?? 0;
+      if (AGENT_TOOLS.has(entry.message.toolName)) {
+        hasSubagents = true;
+        subagents += cost;
+      } else {
+        main += cost;
+      }
+    } else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+      main += entry.usage.cost?.total ?? 0;
+    }
+  }
+
+  return { total: main + subagents, main, subagents, hasSubagents };
+}
+
+/** Session cost in dollars, matching Pi's default footer accounting. */
+export function sessionCost(ctx: ExtensionContext): number {
+  return sessionCosts(ctx).total;
+}
+
+function formatWindow(size: number): string {
+  if (size >= 1_000_000) return `${Math.round(size / 1_000_000)}M`;
+  if (size >= 1_000) return `${Math.round(size / 1_000)}k`;
+  return `${size}`;
+}
+
+export function compactDirectory(dir: string): string {
+  const parts = dir.split("/");
+  if (parts.length <= 2) return dir;
+
+  const workspaceIndex = parts.indexOf(".workspaces");
+  if (workspaceIndex > 0 && workspaceIndex < parts.length - 1) {
+    const workspace = `${parts[0]}⎇${parts[workspaceIndex + 1]}`;
+    const nested = parts.slice(workspaceIndex + 2);
+    if (nested.length === 0) return workspace;
+    if (nested.length === 1) return `${workspace}/${nested[0]}`;
+    return `${workspace}/…/${nested.at(-1)}`;
+  }
+
+  return `${parts[0]}/…/${parts.at(-1)}`;
+}
+
+export function modelDisplayName(model: { id: string; name?: string } | undefined): string {
+  const name = model?.name?.trim();
+  if (name) return name;
+  return model?.id.split("/").at(-1) || "no-model";
+}
+
+export interface FooterSnapshot {
+  directory: string;
+  branch: string | null;
+  git: GitInfo | null;
+  pullRequest: PullRequestInfo | null;
+  modelName: string;
+  thinkingLevel?: string;
+  contextPercent: number;
+  contextWindow: number;
+  quotaWindows: readonly QuotaWindow[];
+  costs: SessionCosts;
+  sessionName?: string;
+}
+
+const THINKING_COLORS: Record<string, ThemeColor> = {
+  off: "thinkingOff",
+  minimal: "thinkingMinimal",
+  low: "thinkingLow",
+  medium: "thinkingMedium",
+  high: "thinkingHigh",
+  xhigh: "thinkingXhigh",
+  max: "thinkingMax",
+};
+const thinkingColor = (level: string) => THINKING_COLORS[level] ?? "muted";
+
+/** Align a logical row when it fits; otherwise wrap groups without discarding the right side. */
+function footerRow(
+  width: number,
+  leftVariants: string[],
+  rightVariants: string[],
+  groups: string[],
+): string[] {
+  for (const left of leftVariants) {
+    for (const right of rightVariants) {
+      const gap = width - visibleWidth(left) - visibleWidth(right);
+      if (gap >= (right ? 2 : 0)) return [left + " ".repeat(gap) + right];
+    }
+  }
+
+  const lines: string[] = [];
+  let line = "";
+  for (const group of groups.filter(Boolean)) {
+    if (line && visibleWidth(line) + 1 + visibleWidth(group) <= width) {
+      line += ` ${group}`;
+      continue;
+    }
+    if (line) lines.push(line);
+    const wrapped = wrapTextWithAnsi(group, width);
+    lines.push(...wrapped.slice(0, -1));
+    line = wrapped.at(-1) ?? "";
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+export function renderStatusFooter(width: number, data: FooterSnapshot, theme: Theme): string[] {
+  if (width <= 0) return ["", ""];
+  const inset = width >= 60 ? 1 : 0;
+  const available = width - inset * 2;
+  const fg = (color: ThemeColor, text: string) => theme.fg(color, text);
+  const chip = (text: string) => (text ? fg("dim", "❬") + text + fg("dim", "❭") : "");
+  const dot = fg("muted", " · ");
+  const gitParts: string[] = [];
+  if (data.git && data.branch) {
+    const git = data.git;
+    if (git.added + git.deleted > 0) {
+      gitParts.push(fg("toolDiffAdded", `+${git.added}`), fg("toolDiffRemoved", `-${git.deleted}`));
+    }
+    if (git.untracked > 0) {
+      gitParts.push(fg("muted", `?${git.untracked}${git.untrackedTruncated ? "+" : ""}`));
+    }
+    if (data.pullRequest?.branch === data.branch) {
+      const color = {
+        failed: "error",
+        pending: "warning",
+        ready: "success",
+        merged: "accent",
+        other: "muted",
+      } as const;
+      gitParts.push(fg(color[data.pullRequest.status], `#${data.pullRequest.number}`));
+    }
+    if (git.ahead > 0) gitParts.push(fg("muted", `↑${git.ahead}`));
+    if (git.behind > 0) gitParts.push(fg("muted", `↓${git.behind}`));
+  }
+  // ❬directory❭❬branch +added -deleted ?untracked #pr ↑ahead ↓behind❭
+  const location = (limit: number) =>
+    chip(fg("text", truncateToWidth(data.directory, limit, "…"))) +
+    (data.branch
+      ? chip([fg("text", truncateToWidth(data.branch, limit, "…")), ...gitParts].join(" "))
+      : "");
+  const fullLeft = location(available);
+  const compactLeft = location(18);
+  const leftVariants = [fullLeft, compactLeft];
+  if (data.sessionName && width >= 60) {
+    leftVariants.unshift(fullLeft + chip(fg("muted", data.sessionName)));
+  }
+  const model = chip(
+    fg("text", data.modelName) +
+      (data.thinkingLevel ? dot + fg(thinkingColor(data.thinkingLevel), data.thinkingLevel) : ""),
+  );
+
+  // Keep the historical headroom scale and thresholds: 80% real usage displays as 100%.
+  const pct = Math.min(100, Math.round((data.contextPercent * 100) / 80));
+  const contextColor = pct >= 80 ? "error" : pct >= 50 ? "warning" : "muted";
+  const contextValue =
+    fg(contextColor, `${pct}%`) + fg("muted", ` / ${formatWindow(data.contextWindow)}`);
+  const context = chip(fg("muted", "context ") + contextValue);
+  const compactContext = chip(fg("muted", "ctx ") + contextValue);
+  const quotas = data.quotaWindows.map(({ label, usedPercent }) => {
+    const color = usedPercent >= 95 ? "error" : usedPercent >= 70 ? "warning" : "muted";
+    return fg("muted", `${label} `) + fg(color, `${Math.round(usedPercent)}%`);
+  });
+  const { costs } = data;
+  const total =
+    costs.hasSubagents || costs.total > 0 ? fg("muted", `$${costs.total.toFixed(3)}`) : "";
+  const detailedCost = costs.hasSubagents
+    ? fg(
+        "muted",
+        `$${costs.total.toFixed(3)} total · $${costs.main.toFixed(3)} main · $${costs.subagents.toFixed(3)} agents`,
+      )
+    : total;
+  const telemetry = (cost: string) => chip([...quotas, cost].filter(Boolean).join(dot));
+
+  return [
+    ...footerRow(available, leftVariants, [model], [compactLeft, model]),
+    ...footerRow(
+      available,
+      [context, compactContext],
+      [telemetry(detailedCost), telemetry(total)],
+      [compactContext, telemetry(total)],
+    ),
+  ].map((line) => " ".repeat(inset) + truncateToWidth(line, available, "…") + " ".repeat(inset));
+}
+
+export default function (pi: ExtensionAPI) {
+  let requestQuotaRefresh: (() => void) | undefined;
+  let requestFooterRender: (() => void) | undefined;
+
+  pi.on("model_select", () => requestQuotaRefresh?.());
+  pi.on("session_info_changed", () => requestFooterRender?.());
+
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode !== "tui") return;
+
+    ctx.ui.setFooter((tui, theme, footerData) => {
+      let currentTheme = theme;
+      let quota: ProviderQuota | null = null;
+      let pullRequest: PullRequestInfo | null = null;
+      let quotaRequest = 0;
+      let pullRequestRequest = 0;
+      let pullRequestBranch: string | null = null;
+      let disposed = false;
+      const quotaAbort = new AbortController();
+      const pullRequestAbort = new AbortController();
+
+      const refreshQuota = () => {
+        const provider = ctx.model?.provider;
+        const request = ++quotaRequest;
+        if (!provider) {
+          quota = null;
+          tui.requestRender();
+          return;
+        }
+        if (quota?.provider !== provider) quota = null;
+        void loadProviderQuota(ctx, provider, quotaAbort.signal)
+          .then((next) => {
+            if (request === quotaRequest && ctx.model?.provider === provider) quota = next;
+          })
+          .catch(() => {
+            if (request === quotaRequest && ctx.model?.provider === provider) quota = null;
+          })
+          .finally(() => {
+            if (!disposed) tui.requestRender();
+          });
+      };
+
+      const refreshPullRequest = () => {
+        const branch = footerData.getGitBranch();
+        if (!canLookupPullRequest(branch)) {
+          pullRequest = null;
+          pullRequestBranch = null;
+          tui.requestRender();
+          return;
+        }
+
+        const request = ++pullRequestRequest;
+        if (pullRequestBranch !== branch) pullRequest = null;
+        pullRequestBranch = branch;
+        void loadPullRequest(pi, ctx.cwd, branch, pullRequestAbort.signal)
+          .then((next) => {
+            if (request === pullRequestRequest && footerData.getGitBranch() === branch) {
+              pullRequest = next;
+            }
+          })
+          .catch(() => {
+            if (request === pullRequestRequest && footerData.getGitBranch() === branch) {
+              pullRequest = null;
+            }
+          })
+          .finally(() => {
+            if (!disposed) tui.requestRender();
+          });
+      };
+
+      const gitStatus = createGitStatusPoller({
+        cwd: () => ctx.cwd,
+        onChange: () => {
+          if (!disposed) tui.requestRender();
+        },
+      });
+      const unsubscribe = footerData.onBranchChange(() => {
+        gitStatus.invalidate();
+        refreshPullRequest();
+        tui.requestRender();
+      });
+      requestQuotaRefresh = refreshQuota;
+      const renderFooter = () => tui.requestRender();
+      requestFooterRender = renderFooter;
+      const quotaTimer = setInterval(refreshQuota, 5 * 60 * 1000);
+      const pullRequestTimer = setInterval(refreshPullRequest, PR_REFRESH_INTERVAL_MS);
+      refreshQuota();
+      refreshPullRequest();
+
+      return {
+        dispose() {
+          disposed = true;
+          unsubscribe();
+          gitStatus.dispose();
+          clearInterval(quotaTimer);
+          clearInterval(pullRequestTimer);
+          quotaAbort.abort();
+          pullRequestAbort.abort();
+          if (requestQuotaRefresh === refreshQuota) requestQuotaRefresh = undefined;
+          if (requestFooterRender === renderFooter) requestFooterRender = undefined;
+        },
+        invalidate() {
+          currentTheme = ctx.ui.theme;
+        },
+        render(width: number): string[] {
+          const git = gitStatus.current();
+          const usage = ctx.getContextUsage();
+          return renderStatusFooter(
+            width,
+            {
+              directory: git ? compactDirectory(git.dir) : basename(ctx.cwd),
+              branch: footerData.getGitBranch(),
+              git,
+              pullRequest,
+              modelName: modelDisplayName(ctx.model),
+              thinkingLevel: ctx.model?.reasoning ? ctx.thinkingLevel : undefined,
+              contextPercent: usage?.percent ?? 0,
+              contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? 0,
+              quotaWindows: quota?.provider === ctx.model?.provider ? (quota?.windows ?? []) : [],
+              costs: sessionCosts(ctx),
+              sessionName: ctx.sessionManager.getSessionName?.(),
+            },
+            currentTheme,
+          );
+        },
+      };
+    });
+  });
+}

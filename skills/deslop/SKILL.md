@@ -1,0 +1,65 @@
+---
+name: deslop
+description: Remove AI-generated slop from code changes (unnecessary comments, low-value tests) or from prose meant for others (PR descriptions, Slack drafts, docs). Use when the user says "deslop", "remove slop", "clean up AI comments", or asks to remove redundant tests that mirror implementation or framework behavior.
+---
+
+# Deslop
+
+Select the task's comparison target deliberately, then remove AI-generated comment and test slop only from the verified task scope. When tests are in scope, load and follow the `test-quality` skill.
+
+## What to remove
+
+### Decorative section headers (top priority)
+
+LLMs compulsively insert "section divider" comments to organize code into labeled regions. These are the single biggest tell of AI-generated code. Remove them aggressively. They add no information — the code structure *is* the organization.
+
+Patterns to match (any comment syntax: `//`, `#`, `/* */`, `--`, etc.):
+- Dashed/decorated dividers: `// --- Tests ---`, `// === Helpers ===`, `# ---- Config ----`
+- Section labels: `// Tests`, `// Helpers`, `// Public API`, `// Private methods`
+- Re-export / sub-module labels: `// --- Re-exports: foo.zig ---`, `// --- Sub-modules ---`
+- Category headers: `// Write helpers`, `// Utility functions`, `// Constants`, `// Type definitions`
+- Any comment that is just a noun or noun phrase acting as a heading for a block of code
+
+If the *pre-existing* code already uses section headers in this style, leave them alone — only strip ones introduced in this branch's diff.
+
+### Other comment slop
+
+- Comments that explain obvious code (`// initialize the variable`, `// return the result`)
+- Redundant comments that restate the function/variable name (`// processItems processes items`)
+- Comments that narrate control flow (`// check if error`, `// loop through items`)
+- TODO/FIXME comments added by AI that weren't requested
+- Doc comments on unexported or obvious functions that don't need them
+- Any comment style inconsistent with the rest of the file
+
+## Low-value test slop
+
+Remove task-added tests when they only:
+
+- enumerate conventional associations, accessors, delegations, or other declarative wiring;
+- reverify stable framework or library behavior;
+- repeat a shared concern or helper's behavior for an includer that does not customize it;
+- assert generic IDs, timestamps, factory validity, or other defaults without an application-owned contract; or
+- mirror implementation branches without naming a credible regression.
+
+Keep tests for business invariants, negative and boundary cases, non-default lifecycle behavior, custom integration semantics, and concrete regressions. Do not remove a test solely because it is simple; apply the `test-quality` value gate and verify existing coverage first.
+
+## Prose
+
+When the target is prose, rewrite it by the "Writing for others" rules in the global instructions. Keep every fact the reader needs and cut the rest. Don't add anything new.
+
+## What to keep
+
+- Comments explaining *why*, not *what*
+- Comments matching the existing style and density of the file
+- License headers
+- Compiler directives and build tags
+- Comments the user wrote (present before this branch)
+
+## Process
+
+1. Determine the intended comparison before editing. Prefer an explicit user-provided base or range, then the PR target or stacked branch's parent, then the repository's default branch (from remote or forge metadata). Do not assume `main`; ask when plausible targets would materially change the scope.
+2. Inspect the committed task diff. Use the explicit range as given, or `git diff <target>...HEAD` for a branch target so the comparison starts at the merge base.
+3. Run `git status --short`, inspect relevant staged and unstaged diffs with `git diff --cached` and `git diff`, and inspect relevant untracked files. Distinguish task changes from unrelated or user-authored local work.
+4. For each task-scoped changed file, read the full file to understand its existing comment style and density.
+5. Remove slop comments and clearly redundant tests only from verified task changes. Do not alter pre-existing content, unrelated hunks, or local work whose ownership is uncertain.
+6. Report a 1-3 sentence summary of what was changed.

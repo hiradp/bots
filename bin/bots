@@ -1,0 +1,497 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+BOTS_DIR="${BOTS_DIR:-$HOME/Code/hiradp/bots}"
+HOME_DIR="${HOME_DIR:-$HOME/Code/hiradp/home}"
+WORK_DIR="${WORK_DIR:-$HOME/Code/planetscale}"
+DEFAULT_TOOLS="pi claude codex herdr"
+
+source "$HOME_DIR/lib/log.sh"
+
+# ------------------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------------------
+
+cmd_setup() {
+  log_banner "Bots Setup"
+
+  log_section "Installing Pi dependencies"
+  _install_pi_deps
+
+  log_section "Linking agent configs"
+  cmd_link
+
+  log_banner "Setup complete"
+}
+
+cmd_link() {
+  local tools="${*:-$DEFAULT_TOOLS}"
+
+  for tool in $tools; do
+    case "$tool" in
+    pi)
+      log_info "Linking pi..."
+      _link_pi
+      ;;
+    claude)
+      log_info "Linking claude..."
+      _link_claude
+      ;;
+    codex)
+      log_info "Linking codex..."
+      _link_codex
+      ;;
+    herdr)
+      log_info "Linking herdr..."
+      _link_herdr
+      ;;
+    *)
+      log_error "Unknown tool: $tool"
+      log_info "Valid tools: $DEFAULT_TOOLS"
+      return 1
+      ;;
+    esac
+  done
+
+  log_ok "Linked"
+}
+
+cmd_upgrade() {
+  log_banner "Bots Upgrade"
+
+  log_section "Pulling latest"
+  git -C "$BOTS_DIR" pull --ff-only
+  log_ok "Up to date"
+
+  log_section "Installing Pi dependencies"
+  _install_pi_deps
+
+  log_section "Linking agent configs"
+  cmd_link
+
+  log_banner "Upgrade complete"
+}
+
+# The report reuses Pi's usage aggregator, so it needs Pi's dependencies.
+cmd_report() {
+  if [ ! -d "$BOTS_DIR/pi/node_modules" ]; then
+    log_error "Pi dependencies are missing"
+    log_dim "Run bots setup"
+    return 1
+  fi
+
+  node "$BOTS_DIR/lib/report.ts"
+}
+
+cmd_help() {
+  cat <<EOF
+bots - coding agent config manager
+
+Usage: bots <command> [args]
+
+Commands:
+  setup                 Install Pi dependencies and link all agent configs
+  link [tools...]       Link agent configs using stow (default: all)
+  upgrade               Pull latest, install Pi dependencies, and re-link
+  report                Show subscription quota and API-equivalent spend across
+                        Pi, Claude (~/.claude), and Codex
+  help                  Show this help message
+
+Tools:
+  pi                    pi/ → ~/.pi/agent; shared skills → ~/.agents/skills
+  claude                claude/ → ~/.claude, with its agents and skills also linked into
+                        ~/.claude-ps; shared files and skills → ~/.claude and ~/.claude-ps
+  codex                 codex/ → ~/.codex, then merge config.managed.toml into config.toml;
+                        shared skills → ~/.agents/skills
+  herdr                 herdr/ → ~/.config/herdr
+
+Every agent also gets instructions.md as its global instructions and the skills
+in skills/. When the work repo exists, its .agents/instructions.md is appended
+and its .agents/skills are linked too.
+
+Environment:
+  BOTS_DIR              Path to this repo (default: ~/Code/hiradp/bots)
+  HOME_DIR              Path to the home dotfiles repo (default: ~/Code/hiradp/home)
+  WORK_DIR              Path to the work repo (default: ~/Code/planetscale)
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+# Pi resolves extension dependencies through the Stowed node_modules, so it must
+# exist before Pi starts.
+_install_pi_deps() {
+  if ! command -v pnpm &>/dev/null; then
+    log_warn "pnpm not found, skipping Pi dependencies"
+    log_dim "Run home install, then bots setup"
+    return 0
+  fi
+
+  pnpm --dir "$BOTS_DIR/pi" install --frozen-lockfile
+  log_ok "Pi dependencies installed"
+}
+
+_link_pi() {
+  local stow="/opt/homebrew/bin/stow"
+
+  mkdir -p "$HOME/.pi/agent"
+  _remove_legacy_links "$HOME/.pi/agent" \
+    "${PI_CONFIG_DIR:-$HOME/Code/hiradp/pi-config}" \
+    "$HOME_DIR/config/pi"
+  _remove_dangling_links "$HOME/.pi/agent" "$BOTS_DIR"
+  $stow -d "$BOTS_DIR" -D pi -t "$HOME/.pi/agent" 2>/dev/null || true
+  $stow -d "$BOTS_DIR" pi -t "$HOME/.pi/agent"
+
+  _link_file "$(_instructions_file)" "$HOME/.pi/agent/APPEND_SYSTEM.md"
+  _link_file "$BOTS_DIR/spinner-verbs.json" "$HOME/.pi/agent/spinner-verbs.json"
+  _link_skills "$HOME/.agents/skills"
+}
+
+# The default identity reads ~/.claude. The `claude-ps` identity (home's
+# claude-ps.fish) reads ~/.claude-ps, which also holds runtime state, so it gets
+# per-file links to the same tracked files instead of a second Stow target.
+# settings.json is not Stowed: both identities link the generated file.
+# Creating agents/ and skills/ first keeps Stow from folding them into links to
+# the repo, which would send the shared skill links into claude/skills.
+_link_claude() {
+  local stow="/opt/homebrew/bin/stow"
+  local dir
+  local entry
+
+  mkdir -p "$HOME/.claude/agents" "$HOME/.claude/skills" \
+    "$HOME/.claude-ps/agents" "$HOME/.claude-ps/skills"
+  _sync_claude_spinner_verbs
+  _generate_claude_settings
+  _remove_legacy_links "$HOME/.claude" "$HOME_DIR/config/claude"
+  _remove_dangling_links "$HOME/.claude" "$BOTS_DIR"
+  _remove_dangling_links "$HOME/.claude-ps" "$BOTS_DIR"
+  $stow -d "$BOTS_DIR" -D claude -t "$HOME/.claude" 2>/dev/null || true
+  $stow -d "$BOTS_DIR" claude -t "$HOME/.claude"
+
+  for entry in "$BOTS_DIR"/claude/agents/*.md "$BOTS_DIR"/claude/skills/*/; do
+    entry="${entry%/}"
+    [[ -e "$entry" ]] || continue
+    ln -sfn "$entry" "$HOME/.claude-ps/${entry#"$BOTS_DIR"/claude/}"
+  done
+  for dir in "$HOME/.claude" "$HOME/.claude-ps"; do
+    _link_file "$BOTS_DIR/.generated/claude-settings.json" "$dir/settings.json"
+    _link_file "$(_instructions_file)" "$dir/CLAUDE.md"
+    _link_skills "$dir/skills"
+  done
+}
+
+# Claude Code reads and rewrites a single settings file, so work-only settings
+# cannot live in a second one. Merge the work repo's overlay over the tracked
+# settings into an ignored file: objects merge key by key and lists concatenate.
+# Changes Claude wrote to the generated file are never overwritten.
+_generate_claude_settings() {
+  local jq="/opt/homebrew/bin/jq"
+  local overlay="$WORK_DIR/.agents/claude-settings.json"
+  local live="$BOTS_DIR/.generated/claude-settings.json"
+  local base="$BOTS_DIR/.generated/claude-settings.base.json"
+  local sources=("$BOTS_DIR/claude/settings.json")
+  local merged
+  local merged_sorted
+  local live_sorted=""
+  local base_sorted=""
+
+  if [[ ! -x "$jq" ]]; then
+    log_error "jq is required to generate Claude settings"
+    return 1
+  fi
+
+  [[ -f "$overlay" ]] && sources+=("$overlay")
+  merged=$("$jq" -n '
+    def merge($a; $b):
+      if ($a | type) == "object" and ($b | type) == "object" then
+        reduce ($b | keys_unsorted[]) as $k ($a; .[$k] = merge($a[$k]; $b[$k]))
+      elif ($a | type) == "array" and ($b | type) == "array" then $a + ($b - $a)
+      else $b end;
+    reduce inputs as $source (null; merge(.; $source))' "${sources[@]}")
+  merged_sorted=$("$jq" -cS . <<<"$merged")
+
+  mkdir -p "$BOTS_DIR/.generated"
+  if [[ -f "$live" ]]; then
+    live_sorted=$("$jq" -cS . "$live")
+    [[ -f "$base" ]] && base_sorted=$("$jq" -cS . "$base")
+    if [[ "$live_sorted" != "$merged_sorted" && "$live_sorted" != "$base_sorted" ]]; then
+      log_error "Claude changed its settings since the last bots link"
+      diff -u --label generated --label current \
+        <("$jq" -S . "$base" 2>/dev/null || "$jq" -S . <<<"$merged") <("$jq" -S . "$live") || true
+      log_info "Port the change into claude/settings.json or $overlay, or delete $live to discard it, then run bots link again"
+      return 1
+    fi
+  fi
+
+  if [[ ! -f "$live" || "$live_sorted" != "$merged_sorted" ]]; then
+    printf '%s\n' "$merged" >"$live"
+    log_info "Generated Claude settings"
+  fi
+  printf '%s\n' "$merged" >"$base"
+}
+
+# Claude's spinnerVerbs take only an inline list, so copy the shared phrases
+# into the tracked settings. The file is rewritten only when the list changed.
+_sync_claude_spinner_verbs() {
+  local jq="/opt/homebrew/bin/jq"
+  local phrases="$BOTS_DIR/spinner-verbs.json"
+  local settings="$BOTS_DIR/claude/settings.json"
+  local synced
+
+  if [[ ! -x "$jq" ]]; then
+    log_error "jq is required to sync Claude spinner verbs"
+    return 1
+  fi
+
+  synced=$("$jq" --slurpfile phrases "$phrases" \
+    '.spinnerVerbs = {mode: "replace", verbs: $phrases[0]}' "$settings")
+  if [[ "$synced" != "$(cat "$settings")" ]]; then
+    printf '%s\n' "$synced" >"$settings"
+    log_info "Synced spinner-verbs.json → Claude spinnerVerbs"
+  fi
+}
+
+_link_codex() {
+  local stow="/opt/homebrew/bin/stow"
+
+  mkdir -p "$HOME/.codex"
+  _remove_legacy_links "$HOME/.codex" "$HOME_DIR/config/codex"
+  _remove_dangling_links "$HOME/.codex" "$BOTS_DIR"
+  _prepare_codex_hooks
+  $stow -d "$BOTS_DIR" -D codex -t "$HOME/.codex" 2>/dev/null || true
+  $stow -d "$BOTS_DIR" codex -t "$HOME/.codex"
+  _merge_codex_config
+
+  _link_file "$(_instructions_file)" "$HOME/.codex/AGENTS.md"
+  _link_skills "$HOME/.agents/skills"
+}
+
+# Link a shared file into place. An existing regular file is replaced only when
+# it is empty or identical to the source, so local edits are never lost.
+_link_file() {
+  local src="$1"
+  local dest="$2"
+
+  if [[ -f "$dest" && ! -L "$dest" ]]; then
+    if [[ -s "$dest" ]] && ! cmp -s "$src" "$dest"; then
+      log_error "Refusing to replace $dest: it differs from $src"
+      log_info "Reconcile the files, then run bots link again"
+      return 1
+    fi
+    rm "$dest"
+  fi
+
+  ln -sfn "$src" "$dest"
+}
+
+# Print the path of the global instructions file to link. When the work repo has
+# its own instructions, they are appended to instructions.md in an ignored file,
+# so run bots link again after editing either one.
+_instructions_file() {
+  local shared="$BOTS_DIR/instructions.md"
+  local work="$WORK_DIR/.agents/instructions.md"
+  local combined="$BOTS_DIR/.generated/instructions.md"
+  local content
+
+  if [[ ! -f "$work" ]]; then
+    rm -f "$combined"
+    printf '%s\n' "$shared"
+    return 0
+  fi
+
+  mkdir -p "$BOTS_DIR/.generated"
+  content="$(cat "$shared")"$'\n\n'"$(cat "$work")"
+  if [[ ! -f "$combined" || "$content" != "$(cat "$combined")" ]]; then
+    printf '%s\n' "$content" >"$combined"
+  fi
+  printf '%s\n' "$combined"
+}
+
+# Link every shared skill, plus the work repo's skills when present, into a
+# user skill directory. Pi and Codex both read ~/.agents/skills; Claude reads
+# only its config dir. Other entries, such as harness-installed or synced
+# skills, are left alone.
+_link_skills() {
+  local dest="$1"
+  local roots=("$BOTS_DIR/skills" "$WORK_DIR/.agents/skills")
+  local root
+  local skill
+  local name
+
+  mkdir -p "$dest"
+  _remove_dangling_links "$dest" "${roots[@]}"
+
+  for root in "${roots[@]}"; do
+    [[ -d "$root" ]] || continue
+    for skill in "$root"/*/; do
+      skill="${skill%/}"
+      [[ -f "$skill/SKILL.md" ]] || continue
+      name=$(basename "$skill")
+
+      if [[ -e "$dest/$name" && ! -L "$dest/$name" ]]; then
+        log_warn "Skipping skill $name: $dest/$name is not a link"
+        continue
+      fi
+      ln -sfn "$skill" "$dest/$name"
+    done
+  done
+}
+
+# Stow cannot replace a regular file on the first link. Remove the existing
+# hooks file only when it is JSON-equivalent to the tracked version; otherwise
+# stop so local hook changes cannot be overwritten accidentally.
+_prepare_codex_hooks() {
+  local src="$BOTS_DIR/codex/hooks.json"
+  local dest="$HOME/.codex/hooks.json"
+  local jq="/opt/homebrew/bin/jq"
+
+  if [[ -f "$dest" && ! -L "$dest" ]]; then
+    if [[ ! -x "$jq" ]]; then
+      log_error "jq is required to compare Codex hooks"
+      return 1
+    fi
+
+    if [[ "$("$jq" -cS . "$src")" == "$("$jq" -cS . "$dest")" ]]; then
+      rm "$dest"
+    else
+      log_error "Codex hooks differ from the tracked configuration: $dest"
+      log_info "Reconcile the files before running bots link codex"
+      return 1
+    fi
+  fi
+}
+
+# Codex writes project trust, plugin, desktop, marketplace, and hook-trust state
+# into config.toml, so it cannot be a link. Merge the portable settings over it
+# instead; tracked keys win.
+_merge_codex_config() {
+  local managed="$BOTS_DIR/codex/config.managed.toml"
+  local live="$HOME/.codex/config.toml"
+  local yq="/opt/homebrew/bin/yq"
+  local tmp
+
+  if [[ ! -x "$yq" ]]; then
+    log_error "yq is required to merge Codex configuration"
+    return 1
+  fi
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/codex-config.XXXXXX")
+
+  if [[ -f "$live" ]]; then
+    "$yq" eval-all -p=toml -o=toml '. as $item ireduce ({}; . * $item)' "$live" "$managed" >"$tmp"
+  else
+    "$yq" -p=toml -o=toml '.' "$managed" >"$tmp"
+  fi
+
+  chmod 600 "$tmp"
+  mv "$tmp" "$live"
+  log_info "Merged managed Codex settings → ~/.codex/config.toml"
+}
+
+_link_herdr() {
+  local stow="/opt/homebrew/bin/stow"
+
+  mkdir -p "$HOME/.config/herdr"
+  _remove_legacy_links "$HOME/.config/herdr" "$HOME_DIR/config/herdr"
+  $stow -d "$BOTS_DIR" -D herdr -t "$HOME/.config/herdr" 2>/dev/null || true
+  $stow -d "$BOTS_DIR" herdr -t "$HOME/.config/herdr"
+}
+
+# Remove links under a target directory that point into a tool config's earlier
+# home, including dangling ones, so Stow does not see them as conflicts. Runtime
+# files are never touched.
+_remove_legacy_links() {
+  local dir="$1"
+  shift
+  local link
+
+  while IFS= read -r -d '' link; do
+    if _link_points_into "$link" "$@"; then
+      rm "$link"
+    fi
+  done < <(find "$dir" -maxdepth 3 -type l -print0)
+}
+
+# Remove dangling links that point into the given roots, such as a Stow link to
+# a file since removed from this repo or a link to a deleted skill.
+_remove_dangling_links() {
+  local dir="$1"
+  shift
+  local link
+
+  [[ -d "$dir" ]] || return 0
+  while IFS= read -r -d '' link; do
+    if [[ ! -e "$link" ]] && _link_points_into "$link" "$@"; then
+      rm "$link"
+    fi
+  done < <(find "$dir" -maxdepth 3 -type l -print0)
+}
+
+_link_points_into() {
+  local link="$1"
+  shift
+  local target
+  local root
+
+  target=$(readlink "$link")
+  if [[ "$target" != /* ]]; then
+    target="$(dirname "$link")/$target"
+  fi
+  target=$(_normalize_path "$target")
+
+  for root in "$@"; do
+    root=$(_normalize_path "$root")
+    case "$target" in
+    "$root" | "$root"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+_normalize_path() {
+  awk -v path="$1" 'BEGIN {
+    count = split(path, parts, "/")
+    depth = 0
+    for (i = 1; i <= count; i++) {
+      if (parts[i] == "" || parts[i] == ".") continue
+      if (parts[i] == "..") {
+        if (depth > 0) depth--
+      } else {
+        resolved[++depth] = parts[i]
+      }
+    }
+    if (depth == 0) {
+      print "/"
+      exit
+    }
+    for (i = 1; i <= depth; i++) printf "/%s", resolved[i]
+    print ""
+  }'
+}
+
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+  setup) cmd_setup ;;
+  link) cmd_link "$@" ;;
+  upgrade) cmd_upgrade ;;
+  report) cmd_report ;;
+  help | --help | -h) cmd_help ;;
+  *)
+    log_error "Unknown command: $cmd"
+    cmd_help
+    exit 1
+    ;;
+  esac
+}
+
+main "$@"

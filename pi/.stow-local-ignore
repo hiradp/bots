@@ -1,0 +1,15 @@
+\.DS_Store
+^/\.scratch
+\.git
+\.gitignore
+\.gitmodules
+^/\.github
+^/\.oxfmtrc\.json
+^/AGENTS\.md
+^/README.*
+^/docs
+^/extensions/guardrails/tests
+^/extensions/tests
+^/pnpm-lock\.yaml
+^/pnpm-workspace\.yaml
+^/tsconfig\.json

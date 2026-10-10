@@ -1,0 +1,10 @@
+/*
+!/.gitignore
+!/.stow-local-ignore
+!/settings.json
+!/statusline.sh
+!/agents/
+!/skills/
+!/hooks/
+/hooks/*
+!/hooks/workspace-context.sh
