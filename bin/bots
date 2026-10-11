@@ -5,7 +5,7 @@ set -euo pipefail
 BOTS_DIR="${BOTS_DIR:-$HOME/Code/hiradp/bots}"
 HOME_DIR="${HOME_DIR:-$HOME/Code/hiradp/home}"
 WORK_DIR="${WORK_DIR:-$HOME/Code/planetscale}"
-DEFAULT_TOOLS="pi claude codex herdr"
+DEFAULT_TOOLS="pi claude codex"
 
 source "$HOME_DIR/lib/log.sh"
 
@@ -41,10 +41,6 @@ cmd_link() {
     codex)
       log_info "Linking codex..."
       _link_codex
-      ;;
-    herdr)
-      log_info "Linking herdr..."
-      _link_herdr
       ;;
     *)
       log_error "Unknown tool: $tool"
@@ -104,7 +100,6 @@ Tools:
                         ~/.claude-ps; shared files and skills → ~/.claude and ~/.claude-ps
   codex                 codex/ → ~/.codex, then merge config.managed.toml into config.toml;
                         shared skills → ~/.agents/skills
-  herdr                 herdr/ → ~/.config/herdr
 
 Every agent also gets instructions.md as its global instructions and the skills
 in skills/. When the work repo exists, its .agents/instructions.md is appended
@@ -389,15 +384,6 @@ _merge_codex_config() {
   chmod 600 "$tmp"
   mv "$tmp" "$live"
   log_info "Merged managed Codex settings → ~/.codex/config.toml"
-}
-
-_link_herdr() {
-  local stow="/opt/homebrew/bin/stow"
-
-  mkdir -p "$HOME/.config/herdr"
-  _remove_legacy_links "$HOME/.config/herdr" "$HOME_DIR/config/herdr"
-  $stow -d "$BOTS_DIR" -D herdr -t "$HOME/.config/herdr" 2>/dev/null || true
-  $stow -d "$BOTS_DIR" herdr -t "$HOME/.config/herdr"
 }
 
 # Remove links under a target directory that point into a tool config's earlier

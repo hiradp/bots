@@ -4,7 +4,7 @@ This file provides guidance to coding agents working in this repository.
 
 ## What this repo is
 
-Configuration for the coding agents I run: Pi, Claude Code, Codex, and herdr, plus the skills they share. It replaced the archived `hiradp/pi-config` repo and the agent configs that used to live in the `home` dotfiles repo; `bin/bots link` removes links left by those old locations.
+Configuration for the coding agents I run: Pi, Claude Code, and Codex, plus the skills they share. It replaced the archived `hiradp/pi-config` repo and the agent configs that used to live in the `home` dotfiles repo; `bin/bots link` removes links left by those old locations.
 
 ## Common commands
 
@@ -26,7 +26,7 @@ Each top-level tool directory is a Stow package for that tool's config directory
 - `pi/` → `~/.pi/agent`. See `pi/AGENTS.md` for Pi extension development.
 - `claude/` → `~/.claude`: `settings.json`, `statusline.sh`, and Claude-only `agents/` and `skills/`. `/review-code` runs its Opus and Sonnet passes as the `code-reviewer` agent and its GPT-6 Astra passes through `codex exec`. The second identity in `~/.claude-ps` (reached through home's `claude-ps` fish wrapper, which leaves the default's `CLAUDE_CONFIG_DIR` unset) gets per-file links to the same `settings.json`, agents, instructions, and skills, so only login, sessions, and history differ. The statusline tells the identities apart through `$CLAUDE_CONFIG_DIR`. `settings.json` is not Stowed: Claude Code reads and rewrites one settings file, so `bots link claude` merges the tracked file with the work repo's `$WORK_DIR/.agents/claude-settings.json` when that exists (objects key by key, lists concatenated) into the ignored `.generated/claude-settings.json`, which both config dirs link. Claude writes its own changes there; the next `bots link` stops and shows them until they are ported into a source or the generated file is deleted.
 - `codex/` → `~/.codex`: `hooks.json` and `config.managed.toml` are Stowed. Codex writes machine-local paths and generated state (project trust, plugins, desktop, marketplace, hook trust) into `~/.codex/config.toml`, so that file is never linked or committed; `bots link codex` merges `config.managed.toml` over it with `yq`, and tracked keys win. Put portable Codex defaults in `config.managed.toml`.
-- `herdr/` → `~/.config/herdr`: `config.toml` only. herdr installs its own agent-state hooks (`~/.claude/hooks/herdr-agent-state.sh`, `~/.codex/herdr-agent-state.sh`, `~/.pi/agent/extensions/herdr-agent-state.ts`) and may rewrite the hook entries in `claude/settings.json` and `codex/hooks.json`; those scripts stay untracked. The `herdr` package and home's `bin/h` workspace launcher remain in the home repo.
+herdr's own config and package live in the home repo, but it reaches into these packages: it installs its own agent-state hooks (`~/.claude/hooks/herdr-agent-state.sh`, `~/.codex/herdr-agent-state.sh`, `~/.pi/agent/extensions/herdr-agent-state.ts`) and may rewrite the hook entries in `claude/settings.json` and `codex/hooks.json`; those scripts stay untracked.
 
 `lib/report.ts` backs `bots report`. It reads Pi sessions through Pi's `/usage` aggregator (`pi/extensions/usage`), prices Claude Code (`~/.claude` only) and Codex transcripts from Pi's model catalog plus a small override table, and fetches live quota with each CLI's stored OAuth token. Runs that don't persist their own session (Pi subagents and historical runs of Pi's removed `claude` tool) count under the harness that started them.
 
