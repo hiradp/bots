@@ -2,6 +2,7 @@
 !/.gitignore
 !/.stow-local-ignore
 !/settings.json
+!/mcp.json
 !/statusline.sh
 !/agents/
 !/skills/

@@ -97,7 +97,8 @@ Commands:
 Tools:
   pi                    pi/ → ~/.pi/agent; shared skills → ~/.agents/skills
   claude                claude/ → ~/.claude, with its agents and skills also linked into
-                        ~/.claude-ps; shared files and skills → ~/.claude and ~/.claude-ps
+                        ~/.claude-ps; shared files and skills → ~/.claude and ~/.claude-ps;
+                        then merge mcp.json servers into each .claude.json
   codex                 codex/ → ~/.codex, then merge config.managed.toml into config.toml;
                         shared skills → ~/.agents/skills
 
@@ -176,6 +177,47 @@ _link_claude() {
     _link_file "$(_instructions_file)" "$dir/CLAUDE.md"
     _link_skills "$dir/skills"
   done
+  _merge_claude_mcp "$HOME/.claude.json"
+  _merge_claude_mcp "$HOME/.claude-ps/.claude.json"
+}
+
+# Claude keeps user-scoped MCP servers in .claude.json alongside its runtime
+# state (~/.claude.json for the default identity, inside the config dir for
+# claude-ps), so that file cannot be a link. Merge the tracked servers into it
+# instead; tracked servers win, and untracked ones are kept but reported so they
+# can be ported into claude/mcp.json.
+_merge_claude_mcp() {
+  local live="$1"
+  local jq="/opt/homebrew/bin/jq"
+  local tracked="$BOTS_DIR/claude/mcp.json"
+  local untracked
+  local tmp
+
+  if [[ ! -x "$jq" ]]; then
+    log_error "jq is required to merge Claude MCP servers"
+    return 1
+  fi
+
+  [[ -f "$live" ]] || printf '{}\n' >"$live"
+
+  untracked=$("$jq" -r --slurpfile tracked "$tracked" \
+    '(.mcpServers // {}) | keys - ($tracked[0].mcpServers | keys) | join(", ")' "$live")
+  if [[ -n "$untracked" ]]; then
+    log_warn "Untracked Claude MCP servers in $live: $untracked"
+    log_dim "Add them to claude/mcp.json to keep them"
+  fi
+
+  if "$jq" -e --slurpfile tracked "$tracked" \
+    '(.mcpServers // {}) * $tracked[0].mcpServers == (.mcpServers // {})' "$live" >/dev/null; then
+    return 0
+  fi
+
+  tmp=$(mktemp "${TMPDIR:-/tmp}/claude-json.XXXXXX")
+  "$jq" --slurpfile tracked "$tracked" \
+    '.mcpServers = (.mcpServers // {}) + $tracked[0].mcpServers' "$live" >"$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$live"
+  log_info "Merged tracked MCP servers → $live"
 }
 
 # Claude Code reads and rewrites a single settings file, so work-only settings
