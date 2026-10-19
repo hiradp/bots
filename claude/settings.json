@@ -17,7 +17,6 @@
     ],
     "defaultMode": "auto"
   },
-  "model": "opus[1m]",
   "skillOverrides": {
     "cowork-plugin-management:cowork-plugin-customizer": "off",
     "cowork-plugin-management:create-cowork-plugin": "off",
