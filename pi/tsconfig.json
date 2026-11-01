@@ -9,6 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["extensions/**/*.ts"],
-  "exclude": ["extensions/herdr-agent-state.ts"]
+  "include": ["extensions/**/*.ts"]
 }

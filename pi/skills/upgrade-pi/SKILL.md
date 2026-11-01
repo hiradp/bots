@@ -15,7 +15,7 @@ Upgrade the installed Pi and this repository's Pi configuration together. A requ
 4. Read the installed Pi documentation and `pi update --help`; update commands have changed across releases. Read release notes between the installed and proposed stable version, especially extension APIs, providers, models, and settings migrations. Do not opt into prereleases unless requested.
 5. Run `pnpm --dir pi check` as a baseline. Diagnose failures before upgrading; distinguish existing failures from regressions.
 
-This covers personal Pi packages and this checkout's authored extensions, not arbitrary project packages or other tools. Keep model defaults and `enabledModels` unchanged unless the user approves replacements. Do not edit guardrail settings or sources, weaken package-manager security/build policies, or bypass checks. If compatibility requires a protected change, stop and report it. Do not overwrite herdr-managed extensions; report any incompatibility with their owning tool separately.
+This covers personal Pi packages and this checkout's authored extensions, not arbitrary project packages or other tools. Keep model defaults and `enabledModels` unchanged unless the user approves replacements. Do not edit guardrail settings or sources, weaken package-manager security/build policies, or bypass checks. If compatibility requires a protected change, stop and report it.
 
 `bin/bots upgrade` pulls the repo, installs the existing lockfile, and relinks every tool. It does not upgrade Pi or dependency versions, so it is not a substitute for this workflow.
 
