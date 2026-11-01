@@ -12,7 +12,6 @@ Configuration for the coding agents I run: Pi, Claude Code, and Codex, plus the 
 bin/bots setup            # Install Pi dependencies, then link every tool
 bin/bots link [tools...]  # Stow tool configs into place (default: all)
 bin/bots upgrade          # git pull --ff-only, install Pi dependencies, re-link
-bin/bots open             # desk open bots
 bin/bots report           # Quota and API-equivalent spend across Pi, Claude, and Codex
 ```
 

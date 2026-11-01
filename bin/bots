@@ -69,10 +69,6 @@ cmd_upgrade() {
   log_banner "Upgrade complete"
 }
 
-cmd_open() {
-  exec desk open bots "$@"
-}
-
 # The report reuses Pi's usage aggregator, so it needs Pi's dependencies.
 cmd_report() {
   if [ ! -d "$BOTS_DIR/pi/node_modules" ]; then
@@ -94,7 +90,6 @@ Commands:
   setup                 Install Pi dependencies and link all agent configs
   link [tools...]       Link agent configs using stow (default: all)
   upgrade               Pull latest, install Pi dependencies, and re-link
-  open [prompt...]      Open this repo with desk (desk open bots)
   report                Show subscription quota and API-equivalent spend across
                         Pi, Claude (~/.claude), and Codex
   help                  Show this help message
@@ -517,7 +512,6 @@ main() {
   setup) cmd_setup ;;
   link) cmd_link "$@" ;;
   upgrade) cmd_upgrade ;;
-  open) cmd_open "$@" ;;
   report) cmd_report ;;
   help | --help | -h) cmd_help ;;
   *)
