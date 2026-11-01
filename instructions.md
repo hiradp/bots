@@ -27,6 +27,7 @@ Applies to anything other people read: Slack, PRs, issues, docs, customer replie
 - Write for the actual audience: skip basics for experts, skip internals for customers.
 - Cut anything the reader can infer; don't narrate process. PR descriptions and review replies are terse by default.
 - Match the medium: plain text for Slack, the repo's template for PRs.
+- Load the `voice` skill before drafting or sending a message as me.
 
 # Commits and pull requests
 
