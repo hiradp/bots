@@ -77,7 +77,7 @@ cmd_report() {
     return 1
   fi
 
-  node "$BOTS_DIR/lib/report.ts"
+  node "$BOTS_DIR/lib/report.ts" "$@"
 }
 
 cmd_help() {
@@ -90,8 +90,8 @@ Commands:
   setup                 Install Pi dependencies and link all agent configs
   link [tools...]       Link agent configs using stow (default: all)
   upgrade               Pull latest, install Pi dependencies, and re-link
-  report                Show subscription quota and API-equivalent spend across
-                        Pi, Claude (~/.claude), and Codex
+  report [--json]       Show subscription quota and API-equivalent spend across
+                        Pi, Claude (~/.claude), and Codex; --json prints it as data
   help                  Show this help message
 
 Tools:
@@ -512,7 +512,7 @@ main() {
   setup) cmd_setup ;;
   link) cmd_link "$@" ;;
   upgrade) cmd_upgrade ;;
-  report) cmd_report ;;
+  report) cmd_report "$@" ;;
   help | --help | -h) cmd_help ;;
   *)
     log_error "Unknown command: $cmd"

@@ -528,13 +528,119 @@ function usageRow(name: string, label: string, usage: { cost: number; tokens: nu
   );
 }
 
-function render(
+// ------------------------------------------------------------------------------
+// Summary
+// ------------------------------------------------------------------------------
+
+interface Usage {
+  cost: number;
+  tokens: number;
+}
+
+interface Periods<T> {
+  today: T;
+  week: T;
+  month: T;
+}
+
+/** Everything the report shows, as data: printed as JSON by `bots report --json`. */
+interface Summary {
+  generatedAt: number;
+  quotas: {
+    account: string;
+    note?: string;
+    windows: {
+      label: string;
+      usedPercent: number;
+      elapsedPercent: number | null;
+      resetsAt: number | null;
+    }[];
+  }[];
+  spend: ({ harness: string } & Periods<number>)[];
+  total: Periods<number>;
+  tokens: Periods<number>;
+  /** This week's top five, by cost. */
+  models: ({ model: string } & Usage)[];
+  projects: ({ project: string } & Usage)[];
+  /** Spend for each of the last seven days, all harnesses together. */
+  daily: { start: number; cost: number }[];
+  unpriced: string[];
+}
+
+function summarize(
   reports: [string, UsageReport][],
   projects: ProjectUsage,
   quotas: Quota[],
   unpriced: Set<string>,
   now: Date,
-): string {
+): Summary {
+  const spend = reports.map(([harness, report]) => ({
+    harness,
+    today: report.periods.day.totals.cost,
+    week: report.periods.week.totals.cost,
+    month: report.periods.month.totals.cost,
+  }));
+  const sum = (pick: (report: UsageReport) => UsageTotals, value: (t: UsageTotals) => number) =>
+    reports.reduce((total, [, report]) => total + value(pick(report)), 0);
+  const periods = (value: (t: UsageTotals) => number): Periods<number> => ({
+    today: sum((r) => r.periods.day.totals, value),
+    week: sum((r) => r.periods.week.totals, value),
+    month: sum((r) => r.periods.month.totals, value),
+  });
+
+  // Models across harnesses, this week.
+  const models = new Map<string, Usage>();
+  for (const [, report] of reports) {
+    for (const model of report.periods.week.models) {
+      if (!model.model) continue;
+      const entry = models.get(model.model) ?? { cost: 0, tokens: 0 };
+      entry.cost += model.cost;
+      entry.tokens += tokens(model);
+      models.set(model.model, entry);
+    }
+  }
+
+  const days = reports[0]?.[1].trends.daily7 ?? [];
+  return {
+    generatedAt: now.getTime(),
+    quotas: quotas.map((quota) => ({
+      account: quota.account,
+      ...(quota.note ? { note: quota.note } : {}),
+      windows: quota.windows.map((window) => ({
+        label: window.label,
+        usedPercent: window.usedPercent,
+        elapsedPercent: elapsedPercent(window, now),
+        resetsAt: window.resetsAt ?? null,
+      })),
+    })),
+    spend,
+    total: periods((t) => t.cost),
+    tokens: periods(tokens),
+    models: [...models.entries()]
+      .sort(([, a], [, b]) => b.cost - a.cost || b.tokens - a.tokens)
+      .slice(0, 5)
+      .map(([model, usage]) => ({ model, ...usage })),
+    projects: [...projects.entries()]
+      .sort(([, a], [, b]) => compareUsage(a, b))
+      .slice(0, 5)
+      .map(([project, totals]) => ({ project, cost: totals.cost, tokens: tokens(totals) })),
+    daily: days.map((bucket, index) => ({
+      start: bucket.start,
+      cost: reports.reduce(
+        (sum, [, report]) => sum + (report.trends.daily7[index]?.totals.cost ?? 0),
+        0,
+      ),
+    })),
+    unpriced: [...unpriced].sort(),
+  };
+}
+
+// ------------------------------------------------------------------------------
+// Table
+// ------------------------------------------------------------------------------
+
+function render(summary: Summary): string {
+  const now = new Date(summary.generatedAt);
   const lines: string[] = [];
   const top = "┌" + "┬".repeat(WIDTH - 2) + "┐";
   const under = "├" + "┴".repeat(WIDTH - 2) + "┤";
@@ -551,14 +657,14 @@ function render(
   lines.push(divider("├", "┬", "┤"));
   const quotaBar = 18;
   lines.push(row("QUOTA", `${" ".repeat(quotaBar)} USED  ELAPSED  RESETS`));
-  for (const quota of quotas) {
+  for (const quota of summary.quotas) {
     if (quota.windows.length === 0) {
       lines.push(row(quota.account, quota.note ?? "no quota reported"));
       continue;
     }
     for (const window of quota.windows) {
       const percent = `${Math.round(window.usedPercent)}%`.padStart(4);
-      const elapsed = elapsedPercent(window, now);
+      const elapsed = window.elapsedPercent;
       const pace = (elapsed === null ? "" : `${Math.round(elapsed)}%`).padStart(8);
       const reset = window.resetsAt ? formatWhen(window.resetsAt) : "";
       lines.push(
@@ -572,82 +678,39 @@ function render(
   }
 
   const columns = (values: string[]) => values.map((value) => value.padStart(12)).join("  ");
+  const triple = (p: Periods<number>) => [p.today, p.week, p.month];
   lines.push(divider("├", "┼", "┤"));
   lines.push(row("SPEND", columns(["TODAY", "WEEK", "MONTH"])));
-  const total = { day: 0, week: 0, month: 0 };
-  for (const [name, report] of reports) {
-    const { day, week, month } = report.periods;
-    total.day += day.totals.cost;
-    total.week += week.totals.cost;
-    total.month += month.totals.cost;
-    lines.push(
-      row(name, columns([day.totals.cost, week.totals.cost, month.totals.cost].map(dollars))),
-    );
+  for (const harness of summary.spend) {
+    lines.push(row(harness.harness, columns(triple(harness).map(dollars))));
   }
-  lines.push(row("TOTAL", columns([total.day, total.week, total.month].map(dollars))));
+  lines.push(row("TOTAL", columns(triple(summary.total).map(dollars))));
+  lines.push(row("TOKENS", columns(triple(summary.tokens).map(formatTokenCount))));
 
-  const tokenTotals = { day: 0, week: 0, month: 0 };
-  for (const [, report] of reports) {
-    tokenTotals.day += tokens(report.periods.day.totals);
-    tokenTotals.week += tokens(report.periods.week.totals);
-    tokenTotals.month += tokens(report.periods.month.totals);
-  }
-  lines.push(
-    row(
-      "TOKENS",
-      columns([tokenTotals.day, tokenTotals.week, tokenTotals.month].map(formatTokenCount)),
-    ),
-  );
-
-  // Models across harnesses, this week.
-  const models = new Map<string, { cost: number; tokens: number }>();
-  for (const [, report] of reports) {
-    for (const model of report.periods.week.models) {
-      if (!model.model) continue;
-      const entry = models.get(model.model) ?? { cost: 0, tokens: 0 };
-      entry.cost += model.cost;
-      entry.tokens += tokens(model);
-      models.set(model.model, entry);
-    }
-  }
-  const topModels = [...models.entries()]
-    .sort(([, a], [, b]) => b.cost - a.cost || b.tokens - a.tokens)
-    .slice(0, 5);
-  if (topModels.length > 0) {
+  if (summary.models.length > 0) {
     lines.push(divider("├", "┼", "┤"));
-    topModels.forEach(([model, usage], index) => {
+    summary.models.forEach(({ model, ...usage }, index) => {
       lines.push(usageRow(index === 0 ? "MODELS (WK)" : "", pad(model, LABEL_WIDTH), usage));
     });
   }
 
-  const topProjects = [...projects.entries()]
-    .sort(([, a], [, b]) => compareUsage(a, b))
-    .slice(0, 5);
-  if (topProjects.length > 0) {
+  if (summary.projects.length > 0) {
     lines.push(divider("├", "┼", "┤"));
-    topProjects.forEach(([project, totals], index) => {
+    summary.projects.forEach(({ project, ...usage }, index) => {
       lines.push(
-        usageRow(index === 0 ? "PROJECTS (WK)" : "", padPath(project || "unknown", LABEL_WIDTH), {
-          cost: totals.cost,
-          tokens: tokens(totals),
-        }),
+        usageRow(
+          index === 0 ? "PROJECTS (WK)" : "",
+          padPath(project || "unknown", LABEL_WIDTH),
+          usage,
+        ),
       );
     });
   }
 
-  // Daily spend for the last seven days, all harnesses together.
-  const days = reports[0]?.[1].trends.daily7 ?? [];
-  const daily = days.map((bucket, index) => ({
-    start: bucket.start,
-    cost: reports.reduce(
-      (sum, [, report]) => sum + (report.trends.daily7[index]?.totals.cost ?? 0),
-      0,
-    ),
-  }));
-  const peak = Math.max(...daily.map((day) => day.cost), 0);
-  if (daily.length > 0) {
+  const peak = Math.max(...summary.daily.map((day) => day.cost), 0);
+  if (summary.daily.length > 0) {
     lines.push(divider("├", "┼", "┤"));
-    for (const day of daily) {
+    for (const day of summary.daily) {
       const label = new Date(day.start)
         .toLocaleDateString("en-GB", { weekday: "short", day: "2-digit" })
         .toUpperCase();
@@ -659,7 +722,7 @@ function render(
   lines.push(divider("└", "┴", "┘"));
 
   lines.push("Spend is API-equivalent; Claude and Codex are priced from token counts.");
-  if (unpriced.size > 0) lines.push(`No price for: ${[...unpriced].sort().join(", ")}`);
+  if (summary.unpriced.length > 0) lines.push(`No price for: ${summary.unpriced.join(", ")}`);
   return lines.join("\n");
 }
 
@@ -702,22 +765,21 @@ for (const harness of [
   }
 }
 
-console.log(
-  render(
+const summary = summarize(
+  [
     [
-      [
-        "PI",
-        aggregateUsage(
-          pi.sessions.map((session) => session.entries),
-          now,
-        ),
-      ],
-      ["CLAUDE", aggregate("claude", claude, now)],
-      ["CODEX", aggregate("codex", codex.requests, now)],
+      "PI",
+      aggregateUsage(
+        pi.sessions.map((session) => session.entries),
+        now,
+      ),
     ],
-    projects,
-    quotas,
-    unpriced,
-    now,
-  ),
+    ["CLAUDE", aggregate("claude", claude, now)],
+    ["CODEX", aggregate("codex", codex.requests, now)],
+  ],
+  projects,
+  quotas,
+  unpriced,
+  now,
 );
+console.log(process.argv.includes("--json") ? JSON.stringify(summary) : render(summary));

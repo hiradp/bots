@@ -12,7 +12,7 @@ Configuration for the coding agents I run: Pi, Claude Code, and Codex, plus the 
 bin/bots setup            # Install Pi dependencies, then link every tool
 bin/bots link [tools...]  # Stow tool configs into place (default: all)
 bin/bots upgrade          # git pull --ff-only, install Pi dependencies, re-link
-bin/bots report           # Quota and API-equivalent spend across Pi, Claude, and Codex
+bin/bots report [--json]  # Quota and API-equivalent spend across Pi, Claude, and Codex
 ```
 
 The `home` CLI (`$HOME_DIR`, default `~/Code/hiradp/home`) clones this repo to `$BOTS_DIR` and chains to it: `home setup` runs `bots setup`, `home link` runs `bots link`, and `home upgrade` runs `bots upgrade`. `bin/bots` sources `$HOME_DIR/lib/log.sh`, so use its `log_*` helpers rather than raw `echo`, and start every bash file with `set -euo pipefail`.
