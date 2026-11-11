@@ -1,5 +1,4 @@
-import { StringEnum } from "@earendil-works/pi-ai";
-import { Type, type Static } from "@earendil-works/pi-ai";
+import { Type, type Static } from "typebox";
 
 const Cursor = Type.Optional(
   Type.String({ minLength: 1, maxLength: 2_000, description: "Pagination cursor from Slack." }),
@@ -7,7 +6,8 @@ const Cursor = Type.Optional(
 
 export const SlackSearchParams = Type.Object(
   {
-    kind: StringEnum(["messages", "channels"] as const, {
+    kind: Type.Enum(["messages", "channels"], {
+      type: "string",
       description: "Whether to search messages or channels.",
     }),
     query: Type.String({ minLength: 1, maxLength: 1_000, description: "Slack search query." }),

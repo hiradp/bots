@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { keyHint, keyText } from "@earendil-works/pi-coding-agent";
 import type {
   CustomEntry,
   EntryRenderer,
@@ -103,7 +104,7 @@ test("persists the completed working message in the session transcript", (t) => 
       customType: "working-message",
       data,
     } satisfies CustomEntry,
-    { expanded: false },
+    { expanded: false, keyHint, keyText },
     theme,
   );
 

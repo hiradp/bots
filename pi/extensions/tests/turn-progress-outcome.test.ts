@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
+import { keyHint, keyText } from "@earendil-works/pi-coding-agent";
 import type {
   CustomEntry,
   EntryRenderer,
@@ -58,7 +59,7 @@ function setup(t: TestContext) {
         customType: "working-message",
         data,
       } satisfies CustomEntry,
-      { expanded: false },
+      { expanded: false, keyHint, keyText },
       theme,
     );
     assert.ok(component);
