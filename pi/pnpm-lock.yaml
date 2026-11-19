@@ -30,8 +30,8 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       typebox:
-        specifier: 1.4.6
-        version: 1.4.6
+        specifier: 1.4.7
+        version: 1.4.7
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -1320,8 +1320,8 @@ packages:
   typebox@1.3.27:
     resolution: {integrity: sha512-zu+jc1pcy4UiNThxikUr36f0Rybk9PEeCg/NE6adeWr/SKsdNO4EzZHYRDlv2YCVAfj3Odq3dESSo/jNyoBXzA==}
 
-  typebox@1.4.6:
-    resolution: {integrity: sha512-Yh8Mi4hzD7gqcuv9ZIk6HK1KVJKubTlfxaNxkrYK35HCvxoCjCuWVr8cBjQ/ChfA7yliPteJEBWHGFVGWDuF5Q==}
+  typebox@1.4.7:
+    resolution: {integrity: sha512-KonYdBj3gOgG/rH96TlUs/f+eaEDqiKRW7KU4/LE/tEjEnRCcfpYLofBfHfNMBAiBosmY55e4YeCPuE+NXmJtg==}
 
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
@@ -2619,7 +2619,7 @@ snapshots:
 
   typebox@1.3.27: {}
 
-  typebox@1.4.6: {}
+  typebox@1.4.7: {}
 
   typescript@7.0.2:
     optionalDependencies:
